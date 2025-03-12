@@ -27,3 +27,5 @@ build/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+.\setup_supabase.sql
