@@ -26,14 +26,22 @@ from database.queries import (
     get_top_products,
     get_top_filters_by_keyword,
     get_keywords_by_client,
-    get_shipping_returns_for_product,
+    get_shipping_returns_by_merchant,
     get_merchant_distribution,
     get_position_trends_over_time
 )
 
 def render_header():
     """Render the app header."""
-    st.title("🛒 Shopping Data Analytics Dashboard")
+    st.markdown(
+        """
+        <h1 style='display: flex; align-items: center; gap: 10px;'>
+            <img src='https://calibrenine.com.au/wp-content/uploads/2022/02/Calibre9-Favicon.png' width='30'>
+            Shopping Data Analytics Dashboard
+        </h1>
+        """,
+        unsafe_allow_html=True
+    )
     st.write("Visualize shopping scraper data trends and insights.")
 
 def render_client_selection(clients):
@@ -58,10 +66,10 @@ def render_metric_selection():
             "Top Products",
             "Position Trends",
             "Filter Analysis",
-            "Shipping & Returns",
+            "Shipping & Returns by Merchant",
             "Merchant Distribution"
         ],
-        default=["Top Products", "Position Trends"]
+        default=["Top Products", "Filter Analysis"]
     )
     
     return metrics
@@ -197,18 +205,24 @@ def render_filter_analysis(supabase, client_name, date_range):
     if not selected_keyword:
         return
     
-    # Get filter data
+    # Get filter data - now split by commas
     filter_data = get_top_filters_by_keyword(supabase, client_name, selected_keyword, date_range)
     
     if not filter_data.empty:
-        # Create visualization
-        fig = px.pie(
+        st.subheader(f"Top 10 Most Common Individual Filters for \"{selected_keyword}\"")
+        
+        # Create bar chart visualization - better for comparing individual filters
+        fig = px.bar(
             filter_data,
-            values='count',
-            names='filter',
-            title=f'Most Common Filters for "{selected_keyword}"',
-            hole=0.4
+            x='count',
+            y='filter',
+            orientation='h',
+            labels={'count': 'Appearances', 'filter': 'Filter Type'},
+            title=f'Top 10 Individual Filters for "{selected_keyword}"',
+            color='count',
+            color_continuous_scale='Blues'
         )
+        fig.update_layout(height=500, yaxis={'categoryorder': 'total ascending'})
         st.plotly_chart(fig, use_container_width=True)
         
         # Add data table
@@ -218,53 +232,90 @@ def render_filter_analysis(supabase, client_name, date_range):
         st.info(f"No filter data available for the keyword '{selected_keyword}'.")
 
 def render_shipping_returns(supabase, client_name, date_range):
-    """Render shipping and returns info for top products."""
-    st.header("Shipping & Returns Analysis")
+    """Render shipping and returns info by merchant."""
+    st.header("Shipping & Returns Analysis by Merchant")
     
-    # Get top products for this client
-    top_products = get_top_products(supabase, client_name, 5, 5, date_range)
+    # Get merchant data for this client
+    merchant_data = get_merchant_distribution(supabase, client_name, date_range)
     
-    if top_products.empty:
-        st.info("No top products found for this client.")
+    if merchant_data.empty:
+        st.info("No merchant data found for this client.")
         return
     
-    # Let user select a product to analyze
-    product_titles = top_products['title'].tolist()
-    product_ids = top_products['product_id'].tolist()
+    # Let user select a merchant to analyze
+    merchant_names = merchant_data['merchant'].tolist()
     
-    selected_index = st.selectbox(
-        "Select product to analyze shipping & returns:",
-        range(len(product_titles)),
-        format_func=lambda i: product_titles[i]
+    selected_merchant = st.selectbox(
+        "Select merchant to view shipping & returns policies:",
+        merchant_names
     )
     
-    if selected_index is None:
+    if not selected_merchant:
         return
     
-    selected_product_id = product_ids[selected_index]
-    selected_product_title = product_titles[selected_index]
-    
-    # Get shipping and returns data
-    shipping_returns_data = get_shipping_returns_for_product(supabase, selected_product_id)
+    # Get shipping and returns data by merchant
+    shipping_returns_data = get_shipping_returns_by_merchant(supabase, selected_merchant)
     
     if shipping_returns_data:
-        st.subheader(f"Shipping & Returns for: {selected_product_title}")
+        st.subheader(f"Shipping & Returns Policies for: {selected_merchant}")
+        
+        col1, col2 = st.columns(2)
         
         # Display shipping info
-        st.write("### Shipping Information")
-        if shipping_returns_data.get('shipping_info'):
-            st.info(shipping_returns_data['shipping_info'])
-        else:
-            st.info("No shipping information available.")
+        with col1:
+            st.write("### Shipping Information")
+            if shipping_returns_data.get('shipping_info'):
+                st.info(shipping_returns_data['shipping_info'])
+            else:
+                st.info("No shipping information available.")
         
         # Display returns info
-        st.write("### Returns Policy")
-        if shipping_returns_data.get('returns_info'):
-            st.info(shipping_returns_data['returns_info'])
-        else:
-            st.info("No returns information available.")
+        with col2:
+            st.write("### Returns Policy")
+            if shipping_returns_data.get('returns_info'):
+                st.info(shipping_returns_data['returns_info'])
+            else:
+                st.info("No returns information available.")
+        
+        # Add products from this merchant
+        st.write("### Products from this Merchant")
+        
+        # Query to get products from this merchant
+        query = f"""
+        SELECT 
+            p.title, 
+            p.rating, 
+            p.price,
+            COUNT(ps.id) as appearance_count
+        FROM 
+            products p
+        JOIN 
+            product_scrapes ps ON p.id = ps.product_id
+        JOIN 
+            keywords k ON ps.keyword_id = k.id
+        JOIN 
+            clients c ON k.client_id = c.id
+        WHERE 
+            c.name = '{client_name}'
+            AND p.merchant = '{selected_merchant}'
+        GROUP BY 
+            p.title, p.rating, p.price
+        ORDER BY 
+            appearance_count DESC
+        LIMIT 10
+        """
+        
+        try:
+            response = supabase.rpc('run_query', {'query_text': query}).execute()
+            if response.data:
+                products_df = pd.DataFrame(response.data)
+                st.dataframe(products_df)
+            else:
+                st.info(f"No products found for {selected_merchant}")
+        except Exception as e:
+            st.error(f"Error fetching products: {e}")
     else:
-        st.info(f"No shipping and returns data available for '{selected_product_title}'.")
+        st.info(f"No shipping and returns data available for '{selected_merchant}'.")
 
 def render_merchant_distribution(supabase, client_name, date_range):
     """Render merchant distribution for top products."""
@@ -342,7 +393,7 @@ def main():
         if "Filter Analysis" in selected_metrics:
             render_filter_analysis(supabase, selected_client, date_range)
         
-        if "Shipping & Returns" in selected_metrics:
+        if "Shipping & Returns by Merchant" in selected_metrics:
             render_shipping_returns(supabase, selected_client, date_range)
         
         if "Merchant Distribution" in selected_metrics:

@@ -112,6 +112,7 @@ def get_top_filters_by_keyword(
 ) -> pd.DataFrame:
     """
     Get the most frequently used filters for a specific keyword.
+    Split the filters by comma and count each individual filter.
     
     Args:
         supabase: Supabase client
@@ -121,7 +122,7 @@ def get_top_filters_by_keyword(
         limit: Number of filters to return
         
     Returns:
-        DataFrame with filter details and count
+        DataFrame with individual filter details and count
     """
     # First get the client ID
     client_response = supabase.table("clients").select("id").eq("name", client_name).execute()
@@ -139,11 +140,10 @@ def get_top_filters_by_keyword(
     
     keyword_id = keyword_response.data[0]["id"]
     
-    # Construct the SQL query
+    # Construct the SQL query to get all filters
     query = f"""
     SELECT 
-        ps.filters as filter,
-        COUNT(ps.id) as count
+        ps.filters as filter_string
     FROM 
         product_scrapes ps
     JOIN 
@@ -162,59 +162,96 @@ def get_top_filters_by_keyword(
         AND sd.scrape_date <= '{end_date}'
         """
     
-    # Complete the query
-    query += f"""
-    GROUP BY 
-        ps.filters
-    ORDER BY 
-        count DESC
-    LIMIT {limit}
-    """
-    
     # Execute the query
     try:
         response = supabase.rpc('run_query', {'query_text': query}).execute()
         
-        if response.data:
-            return pd.DataFrame(response.data)
-        return pd.DataFrame()
+        if not response.data:
+            return pd.DataFrame()
+            
+        # Process the data to split filters
+        all_filters = []
+        for row in response.data:
+            filter_string = row.get('filter_string', '')
+            if filter_string:
+                # Split by comma and strip whitespace
+                individual_filters = [f.strip() for f in filter_string.split(',')]
+                all_filters.extend(individual_filters)
+        
+        # Count frequencies
+        from collections import Counter
+        filter_counts = Counter(all_filters)
+        
+        # Convert to DataFrame and sort
+        df = pd.DataFrame([
+            {'filter': filter_name, 'count': count}
+            for filter_name, count in filter_counts.items()
+        ])
+        
+        if df.empty:
+            return pd.DataFrame()
+            
+        df = df.sort_values('count', ascending=False).head(limit).reset_index(drop=True)
+        return df
+        
     except Exception as e:
-        logger.error(f"Error running top filters query: {str(e)}")
+        logger.error(f"Error processing filters: {str(e)}")
         return pd.DataFrame()
 
-def get_shipping_returns_for_product(supabase: Client, product_id: int) -> Dict[str, Any]:
+def get_shipping_returns_by_merchant(supabase: Client, merchant_name: str) -> Dict[str, Any]:
     """
-    Get shipping and returns information for a specific product.
+    Get shipping and returns information for a specific merchant.
     
-    Note: This is a mockup function since your database schema doesn't have
-    shipping and returns information. In a real implementation, you would
-    need to modify the database schema to include this data.
+    Note: This is a mockup function that returns information based on the merchant name
+    rather than a specific product. In a real implementation, you would query the database
+    for actual shipping and returns policies by merchant.
     
     Args:
         supabase: Supabase client
-        product_id: ID of the product
+        merchant_name: Name of the merchant
         
     Returns:
         Dictionary with shipping and returns info
     """
-    # This is a mockup function. In a real implementation, you would query the database.
-    # For now, we'll return some placeholder data
-    try:
-        # Get the product details
-        product_response = supabase.table("products").select("*").eq("id", product_id).execute()
-        
-        if not product_response.data:
-            return {}
-        
-        # In a real implementation, you would have shipping and returns fields
-        # Since we don't have real data, we'll create some placeholder text
-        return {
-            'shipping_info': "Free shipping on orders over $25. Standard delivery in 3-5 business days.",
-            'returns_info': "Free returns within 30 days of delivery. Must be in original packaging."
+    # Default shipping and returns info
+    default_info = {
+        'shipping_info': "Standard shipping policies apply. Check merchant website for details.",
+        'returns_info': "Standard return policies apply. Check merchant website for details."
+    }
+    
+    # Mapping of merchants to their shipping and returns policies
+    merchant_policies = {
+        'Walmart': {
+            'shipping_info': "Free shipping on orders over $35. Standard delivery in 2-5 business days. NextDay delivery available in select areas.",
+            'returns_info': "Free returns within 90 days of purchase. Some items have a 30-day return window. Some items cannot be returned (check listing)."
+        },
+        'Target': {
+            'shipping_info': "Free shipping on orders over $35 or with RedCard. Standard delivery in 2-5 business days. Same-day delivery through Shipt.",
+            'returns_info': "Most unopened items can be returned within 90 days. RedCard holders get 120 days. Some items have modified return policies."
+        },
+        'Amazon': {
+            'shipping_info': "Free standard shipping for Prime members. Non-Prime: Free shipping on orders over $25. Standard delivery in 4-5 business days.",
+            'returns_info': "Most items can be returned within 30 days of receipt. Some items have different policies. Amazon Prime members get free returns."
+        },
+        'Best Buy': {
+            'shipping_info': "Free standard shipping on orders over $35. Standard delivery in 1-3 business days. Store pickup available.",
+            'returns_info': "Returns accepted within 15 days for most products. Elite and Elite Plus members get extended return periods."
+        },
+        'CVS Pharmacy': {
+            'shipping_info': "Free shipping on orders over $35. Standard delivery in 1-4 business days.",
+            'returns_info': "Returns accepted within 60 days of purchase with receipt. Some items cannot be returned for health reasons."
+        },
+        'Walgreens.com': {
+            'shipping_info': "Free shipping on orders over $35. Standard delivery in 1-3 business days.",
+            'returns_info': "Most items can be returned within 30 days. Health and personal care items may have restrictions."
         }
-    except Exception as e:
-        logger.error(f"Error getting shipping and returns data: {str(e)}")
-        return {}
+    }
+    
+    # Look up the merchant in our mapping, return default if not found
+    if merchant_name in merchant_policies:
+        return merchant_policies[merchant_name]
+    else:
+        return default_info
 
 def get_merchant_distribution(
     supabase: Client,
