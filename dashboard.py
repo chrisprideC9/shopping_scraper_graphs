@@ -86,14 +86,93 @@ def render_date_filter():
     return date_range
 
 def render_top_products_chart(supabase, client_name, date_range, top_n=10):
-    """Render chart showing top products by appearance in position 1 and top 5."""
+    """Render chart showing top products by appearance in position 1 and top 5 with keyword filtering."""
     st.header("Top Products Analysis")
+    
+    # Get keywords for this client
+    keywords = get_keywords_by_client(supabase, client_name)
+    keyword_options = ["All Keywords"] + [k["keyword"] for k in keywords]
+    
+    # Keyword filter
+    selected_keyword = st.selectbox(
+        "Filter by keyword:",
+        keyword_options
+    )
+    
+    # Modify the get_top_products function to include keyword filtering
+    def get_filtered_top_products(position, keyword=None):
+        # First get the client ID
+        client_response = supabase.table("clients").select("id").eq("name", client_name).execute()
+        
+        if not client_response.data:
+            return pd.DataFrame()
+        
+        client_id = client_response.data[0]["id"]
+        
+        # Construct the SQL query
+        query = f"""
+        SELECT 
+            p.id as product_id,
+            p.product_id as original_product_id,
+            p.title,
+            p.link,
+            p.merchant,
+            COUNT(ps.id) as count
+        FROM 
+            product_scrapes ps
+        JOIN 
+            products p ON ps.product_id = p.id
+        JOIN 
+            keywords k ON ps.keyword_id = k.id
+        JOIN 
+            scrape_dates sd ON ps.scrape_date_id = sd.id
+        WHERE 
+            k.client_id = {client_id}
+            AND ps.position <= {position}
+        """
+        
+        # Add keyword filter if specified
+        if keyword and keyword != "All Keywords":
+            query += f"""
+            AND k.keyword = '{keyword}'
+            """
+        
+        # Add date range filter if provided
+        if date_range and len(date_range) == 2:
+            start_date, end_date = date_range
+            query += f"""
+            AND sd.scrape_date >= '{start_date}'
+            AND sd.scrape_date <= '{end_date}'
+            """
+        
+        # Complete the query
+        query += f"""
+        GROUP BY 
+            p.id, p.product_id, p.title, p.link, p.merchant
+        ORDER BY 
+            count DESC
+        LIMIT {top_n}
+        """
+        
+        # Execute the query
+        try:
+            response = supabase.rpc('run_query', {'query_text': query}).execute()
+            
+            if response.data:
+                return pd.DataFrame(response.data)
+            return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"Error running top products query: {str(e)}")
+            return pd.DataFrame()
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader(f"Products in Position #1")
-        top_1_products = get_top_products(supabase, client_name, 1, top_n, date_range)
+        
+        # Get top products filtered by keyword if selected
+        keyword_filter = None if selected_keyword == "All Keywords" else selected_keyword
+        top_1_products = get_filtered_top_products(1, keyword_filter)
         
         if not top_1_products.empty:
             fig = px.bar(
@@ -117,7 +196,9 @@ def render_top_products_chart(supabase, client_name, date_range, top_n=10):
     
     with col2:
         st.subheader(f"Products in Top 5 Positions")
-        top_5_products = get_top_products(supabase, client_name, 5, top_n, date_range)
+        
+        # Get top 5 products filtered by keyword if selected
+        top_5_products = get_filtered_top_products(5, keyword_filter)
         
         if not top_5_products.empty:
             fig = px.bar(
